@@ -18,9 +18,11 @@ async def compress_send(q, dets_q, stop):
     try:
         while not stop.is_set():
             frame = await q.get()
+            if frame is None:
+                break
             result = await analyser(frame)
             if result is None:
-                break
+                continue
             if dets_q.full():
                 dets_q.get_nowait()
             dets_q.put_nowait(analyser.last)

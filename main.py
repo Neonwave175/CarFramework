@@ -11,7 +11,8 @@ async def capture(q, stop):
         while not stop.is_set():
             ret, frame = await asyncio.to_thread(cap.read)
             if not ret:
-                print("Failed to grab frame")
+                print("No camera frame available. Check camera access.")
+                stop.set()
                 break
             if q.full():
                 q.get_nowait()

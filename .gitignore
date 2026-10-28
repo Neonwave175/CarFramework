@@ -1,2 +1,15 @@
 __pycache__/
 .venv/
+
+# Local databases and downloaded archives
+*.sqlite3
+*.db
+aurora-glass-carframework-one-shot.zip
+avif-lab-aurora-glass.zip
+
+# Local databases and downloaded archives
+*.sqlite3
+*.db
+aurora-glass-carframework-one-shot.zip
+aurora-glass-carframework-one-shot/
+avif-lab-aurora-glass.zip
