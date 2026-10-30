@@ -11,7 +11,7 @@ MLKEM_PK_LEN = 1184
 MLKEM_CT_LEN = 1088
 CONTROL_PORT = 5006
 VIDEO_PORT = 5005
-NONCE_LEN = 12
+NONCE_LEN = 192
 
 
 def encrypt(plaintext: bytes, key: bytes) -> bytes:
