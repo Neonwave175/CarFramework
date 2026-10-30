@@ -3,3 +3,4 @@ __pycache__/
 # ML-DSA private keys
 sender_mldsa_sk.bin
 receiver_mldsa_sk.bin
+*.bin
