@@ -137,9 +137,10 @@
     state.view = view;
     $$('.view').forEach(node => node.classList.toggle('active', node.id === `view-${view}`));
     $$('.nav-item[data-view]').forEach(node => node.classList.toggle('active', node.dataset.view === view));
-    const label = ({ dashboard: 'Overview', video: 'Video studio', robot: 'Robot control', codec: 'Codec lab', settings: 'Settings' })[view] || 'Overview';
+    const label = ({ dashboard: 'Overview', video: 'Video studio', robot: 'Robot control', codec: 'Codec lab', security: 'Post-quantum security', settings: 'Settings' })[view] || 'Overview';
     setText('#breadcrumb-current', label);
     if (view === 'video' && state.mediaFile) syncMediaInfo();
+    if (view === 'security') refreshSecurityStatus({ quiet: true });
     window.scrollTo({ top: 0, behavior: state.reduceMotion ? 'auto' : 'smooth' });
   }
   function enterWorkspace(name) {
@@ -297,6 +298,80 @@
     }
   }
 
+  async function refreshSecurityStatus(options = {}) {
+    const refreshButton = $('#security-refresh');
+    const tls = window.location.protocol === 'https:';
+    setText('#security-web-transport', tls ? 'HTTPS / WSS' : 'HTTP / WS');
+    setText('#security-web-detail', tls ? 'TLS protects the browser-facing connection' : (['localhost', '127.0.0.1', '::1'].includes(window.location.hostname) ? 'Local development · no network TLS' : 'No TLS on this connection · use HTTPS/WSS'));
+    if (refreshButton) refreshButton.disabled = true;
+    try {
+      const data = await apiRequest('/api/security/status');
+      const pqcEnabled = data.pqc_transport_enabled === true;
+      const tag = $('#security-state-tag');
+      if (tag) {
+        tag.className = `tag ${pqcEnabled ? 'tag-cyan' : 'tag-warning'}`;
+        tag.innerHTML = `<span class="tag-dot"></span> ${pqcEnabled ? 'PQC ENABLED' : 'PQC NOT ACTIVE'}`;
+      }
+      setText('#security-state-eyebrow', pqcEnabled ? 'SECURE TRANSPORT ACTIVE' : (data.pqc_handshake_code_present ? 'SOURCE CRYPTO PRESENT · BLOCKED' : 'IMPLEMENTATION STATUS'));
+      setText('#security-state-title', pqcEnabled ? 'Post-quantum transport reported active' : (data.pqc_handshake_code_present ? 'CarFramework crypto is present but not operational' : 'Post-quantum transport is not enabled'));
+      setText('#security-state-copy', data.message || 'The backend did not return CarFramework source-level transport details. Do not infer that its encrypted UDP video path is active or connected to this dashboard.');
+      setText('#security-pqc-handshake', data.pqc_handshake_code_present ? 'CODE PRESENT · NOT VERIFIED' : 'NOT PRESENT');
+      setText('#security-device-auth', data.robot_token_configured ? 'TOKEN CONFIGURED' : 'TOKEN NOT SET');
+      setText('#security-device-detail', data.robot_token_configured ? 'Separate dashboard WebSocket token is configured' : 'Set ROBOT_DEVICE_TOKEN for the separate dashboard WebSocket API');
+      setText('#security-cookie-status', data.secure_cookie_configured ? 'SECURE' : 'NOT SECURE');
+      setText('#security-cookie-detail', data.secure_cookie_configured ? 'Secure cookie flag is enabled' : 'Set AVIF_COOKIE_SECURE=1 when serving over HTTPS');
+      setText('#security-api-status', 'API REACHABLE');
+      setText('#security-last-check', new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }));
+      if (!options.quiet) toast(pqcEnabled ? 'Security status refreshed.' : 'API reachable, but CarFramework transport has unresolved compatibility blockers.', pqcEnabled ? 'success' : 'error');
+    } catch (error) {
+      const tag = $('#security-state-tag');
+      if (tag) { tag.className = 'tag tag-warning'; tag.innerHTML = '<span class="tag-dot"></span> STATUS UNAVAILABLE'; }
+      setText('#security-state-title', 'Could not verify backend security status');
+      setText('#security-state-copy', error.message || 'The security status endpoint could not be reached. This does not mean encryption is active.');
+      setText('#security-api-status', 'API UNAVAILABLE');
+      setText('#security-device-auth', 'UNKNOWN');
+      setText('#security-device-detail', 'Backend status could not be read');
+      setText('#security-cookie-status', 'UNKNOWN');
+      setText('#security-cookie-detail', 'Backend status could not be read');
+      setText('#security-pqc-handshake', 'UNKNOWN');
+      setText('#security-last-check', new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }));
+      if (!options.quiet) toast(error.message || 'Could not refresh security status.', 'error');
+    } finally {
+      if (refreshButton) refreshButton.disabled = false;
+    }
+  }
+
+  async function copySecurityChecklist() {
+    const checklist = [
+      'CarFramework / Aurora Glass integration notes',
+      '',
+      'Supplied CarFramework source settings:',
+      '- ML-KEM-768 key establishment',
+      '- ML-DSA-44 signatures',
+      '- UDP key-exchange/control port: 5006',
+      '- Encrypted AVIF video port: UDP 5005',
+      '- Sender destination in sender.py: 192.168.68.57:5005',
+      '- AES-256-GCM-SIV is called, but encryption.py sets NONCE_LEN=192; required nonce length is 12 bytes.',
+      '- No HKDF derivation is present in the supplied encryption.py.',
+      '',
+      'Dashboard integration status:',
+      '- FastAPI browser viewer is a separate WebSocket path.',
+      '- reciever.py currently displays decrypted frames via cv2.imshow and does not forward them to the browser.',
+      '- This UI package does not bind UDP 5005 or 5006.',
+      '- Do not claim the video path is operational or post-quantum-secure until the nonce issue and browser frame bridge are fixed and tested.'
+    ].join('\n');
+    try {
+      if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(checklist);
+      else {
+        const field = document.createElement('textarea'); field.value = checklist; field.setAttribute('readonly', '');
+        field.style.position = 'fixed'; field.style.opacity = '0'; document.body.appendChild(field); field.select();
+        const copied = document.execCommand('copy'); field.remove();
+        if (!copied) throw new Error('Clipboard access is unavailable in this browser.');
+      }
+      toast('CarFramework integration notes copied. No keys or secrets were copied.');
+    } catch (error) { toast(error.message || 'Could not copy the integration notes.', 'error'); }
+  }
+
   function addCommand(command, description) {
     state.commandCount++;
     setText('#command-count', `${state.commandCount} EVENTS`); setText('#last-command', command); setText('#last-command-time', `${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })} · ${description}`);
@@ -414,8 +489,8 @@
     ['#video-placeholder', '#studio-placeholder'].forEach(sel => $(sel).classList.add('hidden'));
     ['#video-element', '#studio-video', '#image-element', '#studio-image', '#laptop-camera-element', '#studio-laptop-camera'].forEach(sel => $(sel).classList.add('hidden'));
     $('#recording-indicator').classList.remove('hidden');
-    setText('#stage-resolution', 'ROBOT CAMERA · JPEG');
-    setCameraSourceText('Raspberry Pi camera', 'Live JPEG frames · authenticated WebSocket', 'ROBOT LIVE');
+    setText('#stage-resolution', 'DEVICE FEED · JPEG');
+    setCameraSourceText('Authenticated device feed', 'Live JPEG frames · dashboard WebSocket', 'ROBOT LIVE');
     if (previousUrl) window.setTimeout(() => URL.revokeObjectURL(previousUrl), 1200);
   }
 
@@ -430,7 +505,7 @@
     socket.binaryType = 'blob';
     setCameraControls('robot');
     setCameraSourceText('Connecting to robot camera…', 'Waiting for authenticated robot stream', 'CONNECTING');
-    socket.onopen = () => { if (state.cameraSocket === socket) toast('Camera viewer connected. Waiting for the Raspberry Pi frames.'); };
+    socket.onopen = () => { if (state.cameraSocket === socket) toast('Camera viewer connected. Waiting for authenticated device frames.'); };
     socket.onmessage = event => {
       if (state.cameraSocket !== socket) return;
       if (typeof event.data === 'string') {
@@ -458,7 +533,7 @@
       ['#robot-camera-element', '#studio-robot-camera'].forEach(sel => $(sel).classList.add('hidden'));
       ['#video-placeholder', '#studio-placeholder'].forEach(sel => $(sel).classList.remove('hidden'));
       $('#recording-indicator').classList.add('hidden');
-      setCameraSourceText('No source selected', 'Robot camera API · waiting for stream', 'NO SOURCE');
+      setCameraSourceText('No source selected', 'Dashboard WebSocket viewer · waiting for device frames', 'NO SOURCE');
     };
   }
 
@@ -469,7 +544,7 @@
     if (state.cameraFrameUrl) { URL.revokeObjectURL(state.cameraFrameUrl); state.cameraFrameUrl = null; }
     $('#recording-indicator').classList.add('hidden');
     ['#video-placeholder', '#studio-placeholder'].forEach(sel => sel && $(sel).classList.remove('hidden'));
-    setCameraControls(''); setCameraSourceText('No source selected', 'Ready for a local file or API stream', 'NO SOURCE');
+    setCameraControls(''); setCameraSourceText('No source selected', 'Ready for a local file or authenticated WebSocket feed', 'NO SOURCE');
   }
 
   async function startLocalCamera() {
@@ -535,6 +610,8 @@
   $('#save-codec').addEventListener('click', saveCodec);
   $('#reset-codec').addEventListener('click', () => { state.codec = DEFAULTS.codec; state.quality = DEFAULTS.quality; state.resolution = DEFAULTS.resolution; state.pixel = DEFAULTS.pixel; state.metadata = DEFAULTS.metadata; state.chunks = DEFAULTS.chunks; applyPrefsToUi(); toast('Codec controls reset. Save profile to persist changes.'); });
   $('#save-settings').addEventListener('click', saveSettings); $('#save-network').addEventListener('click', saveNetwork);
+  $('#security-refresh').addEventListener('click', () => refreshSecurityStatus());
+  $('#security-copy-checklist').addEventListener('click', copySecurityChecklist);
   $('#clear-local-data').addEventListener('click', () => showModal('Clear local preferences?', 'This removes AVIF Lab preferences stored in this browser. It will not delete your files, but saved display and codec settings will reset.', 'Clear data', async () => {
     try { await dbClear(); Object.assign(state, DEFAULTS); applyPrefsToUi(); setText('#settings-save-message', ''); setText('#network-save-message', ''); setText('#codec-save-message', ''); toast('Local preferences cleared.'); }
     catch { toast('Could not clear browser preferences.', 'error'); }
@@ -545,10 +622,10 @@
     if (event.key === 'Escape') { $('#search-strip').classList.add('hidden'); event.target.value = ''; }
     if (event.key === 'Enter') {
       const query = event.target.value.trim().toLowerCase();
-      const map = [['dashboard', ['overview', 'dashboard', 'home']], ['video', ['video', 'media', 'stream', 'upload']], ['robot', ['robot', 'control', 'sensor', 'line']], ['codec', ['codec', 'avif', 'av1', 'quality', 'encode']], ['settings', ['settings', 'network', 'preferences', 'api']]];
+      const map = [['dashboard', ['overview', 'dashboard', 'home']], ['video', ['video', 'media', 'stream', 'upload']], ['robot', ['robot', 'control', 'sensor', 'line']], ['codec', ['codec', 'avif', 'av1', 'quality', 'encode']], ['security', ['security', 'encryption', 'encrypt', 'quantum', 'pqc', 'kem', 'dsa', 'keys']], ['settings', ['settings', 'network', 'preferences', 'api']]];
       const match = map.find(([, words]) => words.some(word => query.includes(word)));
       if (match) { setView(match[0]); $('#search-strip').classList.add('hidden'); toast(`Opened ${match[0]}.`); }
-      else toast('No matching dashboard section. Try video, robot, codec, or settings.', 'error');
+      else toast('No matching dashboard section. Try video, robot, codec, security, or settings.', 'error');
     }
   });
   $('#global-search').addEventListener('input', () => {});

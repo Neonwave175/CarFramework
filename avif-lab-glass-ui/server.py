@@ -36,7 +36,7 @@ MAX_JPEG_BYTES = 1_500_000
 USERNAME_RE = re.compile(r"^[a-zA-Z0-9_.-]{3,40}$")
 ALLOWED_SUFFIXES = {".mp4", ".webm", ".mov", ".m4v", ".mkv", ".ogv", ".avi", ".avif", ".avifs", ".jpg", ".jpeg", ".png", ".webp"}
 
-app = FastAPI(title="AVIF Lab API", version="0.4.0", docs_url="/api/docs", redoc_url=None)
+app = FastAPI(title="AVIF Lab API", version="0.5.0", docs_url="/api/docs", redoc_url=None)
 robot_clients: set[WebSocket] = set()
 camera_viewers: set[WebSocket] = set()
 latest_frame: bytes | None = None
@@ -175,6 +175,47 @@ def on_startup() -> None:
 @app.get("/api/health")
 def health() -> dict:
     return {"ok": True, "version": app.version, "robot_configured": bool(ROBOT_DEVICE_TOKEN)}
+
+
+@app.get("/api/security/status")
+def security_status() -> dict:
+    """Expose the supplied CarFramework transport settings without claiming they work.
+
+    The values below match the uploaded sender.py, reciever.py, and encryption.py.
+    In particular, the 192-byte nonce setting is incompatible with AES-GCM-SIV,
+    which requires a 12-byte nonce. The dashboard's authenticated browser
+    WebSocket is a separate path and does not consume CarFramework UDP packets.
+    """
+    return {
+        "pqc_transport_enabled": False,
+        "pqc_handshake_code_present": True,
+        "robot_token_configured": bool(ROBOT_DEVICE_TOKEN),
+        "secure_cookie_configured": COOKIE_SECURE,
+        "current_camera_authentication": "CarFramework ML-KEM/ML-DSA handshake code; separate dashboard WebSocket token",
+        "carframework": {
+            "key_establishment": "ML-KEM-768",
+            "signature_scheme": "ML-DSA-44",
+            "key_derivation": "Direct ML-KEM shared secret; HKDF is not present in the uploaded source",
+            "aead": "AES-256-GCM-SIV",
+            "control_transport": "UDP",
+            "control_port": 5006,
+            "video_transport": "UDP",
+            "video_port": 5005,
+            "sender_destination_default": "192.168.68.57:5005",
+            "configured_nonce_bytes": 192,
+            "required_nonce_bytes": 12,
+            "dashboard_udp_bridge_enabled": False,
+        },
+        "message": (
+            "CarFramework source uses ML-KEM-768 and ML-DSA-44 for its UDP key exchange "
+            "on port 5006, then sends encrypted AVIF datagrams to UDP port 5005. "
+            "The uploaded encryption.py sets NONCE_LEN=192, but AES-256-GCM-SIV requires "
+            "a 12-byte nonce; as written, its encrypt/decrypt calls are not interoperable. "
+            "The code also uses the shared secret directly (no HKDF). Separately, this "
+            "dashboard does not yet bridge CarFramework's encrypted UDP receiver into "
+            "the browser viewer. Do not report this stream as operational or post-quantum-secure."
+        ),
+    }
 
 
 @app.post("/api/auth/register", status_code=201)
