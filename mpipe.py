@@ -9,7 +9,7 @@ MODE = "both"
 IMGSZ = 320
 CENTER = (0.35, 0.65)
 MODELS = {
-    "detect": "yolov8n_ncnn_model",
+    "detect": "yolov26n_ncnn_model",
     "pose": "yolov8n-pose_ncnn_model",
 }
 

@@ -1,0 +1,14 @@
+{
+  "name": "carview",
+  "version": "0.1.0",
+  "private": true,
+  "description": "CarView desktop receiver for CarFramework",
+  "main": "desktop/main.js",
+  "scripts": {
+    "build:receiver": "cargo build --release",
+    "start": "npm run build:receiver && electron ."
+  },
+  "devDependencies": {
+    "electron": "^35.7.5"
+  }
+}

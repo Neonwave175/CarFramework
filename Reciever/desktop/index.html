@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'">
+  <title>CarView</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main class="shell">
+    <header class="top">
+      <div class="brand"><span class="logo" aria-hidden="true">✳</span><div>CarView<small>CARFRAMEWORK RECEIVER</small></div></div>
+      <span class="tag" id="feed-tag">OFFLINE</span>
+    </header>
+    <div class="heading"><div class="eyebrow">YOUR CAMERA, IN FOCUS</div><h1>CarView</h1><p>View your camera stream and manage your connection.</p></div>
+    <div class="grid">
+      <section class="glass panel preview-panel" aria-labelledby="preview-heading">
+        <div class="panel-heading"><div><div class="eyebrow">VISUAL FEED</div><h2 id="preview-heading">Camera preview</h2></div><span class="frame-count" id="frame-count">No frames received</span></div>
+        <div class="stage"><img id="frame" alt="Live camera frame" hidden><div id="placeholder"><div class="camera-icon" aria-hidden="true">◎</div><h3>Your feed starts here</h3><p>Choose your key files and start the receiver<br>to view an authenticated camera stream.</p></div></div>
+        <div class="status" role="status" aria-live="polite"><span class="status-dot" id="status-dot"></span><div><strong id="receiver-status">Offline</strong><span id="receiver-detail">Ready to connect</span></div></div>
+      </section>
+      <section class="glass panel" aria-labelledby="setup-heading">
+        <div class="panel-heading"><div><div class="eyebrow">CONNECTION</div><h2 id="setup-heading">Receiver setup</h2></div><span class="tag">UDP</span></div>
+        <p class="copy">Select the trusted sender’s public key and this receiver’s private key.</p>
+        <label for="sender-key">Sender public key</label><div class="file-row"><input id="sender-key" readonly placeholder="No file selected"><button class="secondary" id="sender-select">Browse</button></div>
+        <label for="receiver-key">Receiver private key</label><div class="file-row"><input id="receiver-key" readonly placeholder="No file selected"><button class="secondary" id="receiver-select">Browse</button></div>
+        <label for="python">Python executable</label><input id="python" value="python3" spellcheck="false"><small class="hint">Use the Python environment that has the framework’s cryptography dependency installed.</small>
+        <div class="actions"><button class="primary" id="start">Start receiver <span aria-hidden="true">→</span></button><button class="secondary" id="stop" disabled>Stop</button></div>
+        <div class="callout"><b>Protocol note</b><p>The current framework uses a 192-byte nonce, but AES-GCM-SIV requires 12 bytes. The sender and receiver must be updated together before streaming.</p></div>
+      </section>
+    </div>
+  </main>
+  <script src="renderer.js"></script>
+</body>
+</html>
