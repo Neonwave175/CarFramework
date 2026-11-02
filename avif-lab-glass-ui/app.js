@@ -8,7 +8,8 @@
     mediaKind: null, db: null, dbReady: false, codec: 'AVIF', quality: 72,
     resolution: '1280 × 720', pixel: 'Auto', metadata: true, chunks: false,
     compact: false, reduceMotion: false, network: { robotUrl: '', videoUrl: '', apiEndpoint: '' },
-    cameraSocket: null, cameraFrameUrl: null, localCameraStream: null, activeCamera: null
+    cameraSocket: null, cameraFrameUrl: null, localCameraStream: null, activeCamera: null,
+    metricsTimer: null, lastObservedState: null
   };
   const DEFAULTS = {
     workspace: 'Personal workspace', compact: false, reduceMotion: false,
@@ -151,9 +152,12 @@
     $('#login-screen').classList.add('hidden'); $('#app-shell').classList.remove('hidden');
     setView(state.view || 'dashboard');
     toast(`Workspace ready. Welcome, ${firstName}.`);
+    addActivity('Signed in', `Authenticated session opened for ${state.user}.`, 'mint');
     connectRobot({ quiet: true });
+    startMetricsPolling();
   }
   async function leaveWorkspace() {
+    stopMetricsPolling();
     stopLiveSources();
     try { await apiRequest('/api/auth/logout', { method: 'POST' }); } catch { /* session may already be expired */ }
     $('#app-shell').classList.add('hidden'); $('#login-screen').classList.remove('hidden');
@@ -200,7 +204,7 @@
     const iconName = kind === 'cyan' ? 'cpu' : kind === 'orange' ? 'wifi' : kind === 'mint' ? 'check' : 'activity';
     const iconBox = document.createElement('span'); iconBox.className = `activity-icon ${kind}`; iconBox.innerHTML = icon(iconName);
     const copy = document.createElement('div'); const b = document.createElement('b'); b.textContent = title; const p = document.createElement('p'); p.textContent = description; copy.append(b, p);
-    const time = document.createElement('time'); time.textContent = 'Just now'; row.append(iconBox, copy, time); list.prepend(row);
+    const time = document.createElement('time'); time.textContent = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }); row.append(iconBox, copy, time); list.prepend(row);
     while (list.children.length > 5) list.lastElementChild.remove();
   }
 
@@ -264,39 +268,147 @@
     else if (state.mediaKind === 'image') setText('#detail-duration', 'Still image');
   }
 
+  function renderRobotState(connected, telemetry = {}) {
+    state.connected = !!connected;
+    const online = state.connected;
+    $('#connect-robot').innerHTML = `${icon('wifi')} ${online ? 'Refresh robot status' : 'Check robot connection'}`;
+    $('#robot-connect-page').innerHTML = `${icon('wifi')} Check status`;
+    $('#robot-connection-tag').className = `tag ${online ? 'tag-cyan' : 'tag-warning'}`;
+    $('#robot-connection-tag').innerHTML = `<span class="tag-dot"></span> ${online ? 'CONNECTED' : 'DISCONNECTED'}`;
+    $('#robot-page-status').className = `tag ${online ? 'tag-cyan' : 'tag-warning'}`;
+    $('#robot-page-status').innerHTML = `<span class="tag-dot"></span> ${online ? 'ROBOT ONLINE' : 'ROBOT OFFLINE'}`;
+    setText('#robot-stat-badge', online ? 'CONTROL ONLINE' : 'CONTROL OFFLINE');
+    $('#robot-stat-badge').className = `trend ${online ? 'good' : 'warning'}`;
+
+    const battery = typeof telemetry.battery === 'number' && Number.isFinite(telemetry.battery) ? Math.max(0, Math.min(100, telemetry.battery)) : null;
+    setText('#robot-stat-number', battery == null ? '— %' : `${battery.toFixed(0)} %`);
+    setText('#robot-stat-status', online ? (battery == null ? 'Connected · battery not reported' : 'Live battery telemetry') : 'No control telemetry');
+    setText('#robot-mode', typeof telemetry.mode === 'string' ? telemetry.mode : (online ? 'Connected · mode not reported' : 'Not reported'));
+    setText('#robot-link', online ? 'Control online' : 'Control offline');
+    setText('#robot-battery', battery == null ? '—' : `${battery.toFixed(0)}%`);
+    setText('#sensor-left', telemetry.sensor_left ?? '—'); setText('#sensor-right', telemetry.sensor_right ?? '—');
+    setText('#left-reading', telemetry.sensor_left ?? '—'); setText('#right-reading', telemetry.sensor_right ?? '—');
+    if (Number.isFinite(telemetry.position_x) && Number.isFinite(telemetry.position_y)) {
+      setText('#robot-position', `X ${telemetry.position_x.toFixed(1)} · Y ${telemetry.position_y.toFixed(1)}`);
+    } else {
+      setText('#robot-position', 'POSITION NOT REPORTED');
+    }
+    const batterySegments = $$('#battery-visual span');
+    batterySegments.forEach((segment, index) => segment.classList.toggle('is-filled', battery != null && (index + 1) * 10 <= battery));
+    $('#quick-stop').disabled = !online;
+    $$('.direction-btn, #direction-stop').forEach(btn => btn.disabled = !online);
+    setText('#controller-caption', online ? 'Authenticated control device connected' : 'No authenticated control device connected');
+    const hasSensorReading = telemetry.sensor_left != null || telemetry.sensor_right != null;
+    $('#left-node').classList.toggle('has-reading', telemetry.sensor_left != null);
+    $('#right-node').classList.toggle('has-reading', telemetry.sensor_right != null);
+    $('#sensor-line-display').classList.toggle('hidden', typeof telemetry.line_detected !== 'boolean' || telemetry.line_detected !== true);
+    setText('#sensor-line-state', telemetry.line_detected === true ? 'Device reports: line detected' : telemetry.line_detected === false ? 'Device reports: no line detected' : 'Line state not reported');
+    if (!online) setText('#sensor-summary', 'No live robot telemetry. Sensor readings appear only when the control device reports them.');
+    else if (hasSensorReading || typeof telemetry.line_detected === 'boolean') setText('#sensor-summary', 'Sensor values shown here were received from the authenticated control device.');
+    else setText('#sensor-summary', 'Control device connected; sensor readings have not been reported.');
+  }
+
   async function connectRobot(options = {}) {
     try {
       const data = await apiRequest('/api/robot/status');
-      state.connected = !!data.connected;
-      const connected = state.connected;
-      const telemetry = data.telemetry || {};
-      $('#connect-robot').innerHTML = `${icon('wifi')} ${connected ? 'Refresh robot status' : 'Check robot connection'}`;
-      $('#robot-connect-page').innerHTML = `${icon('wifi')} Check status`;
-      $('#robot-connection-tag').className = `tag ${connected ? 'tag-cyan' : 'tag-warning'}`;
-      $('#robot-connection-tag').innerHTML = `<span class="tag-dot"></span> ${connected ? 'CONNECTED' : 'DISCONNECTED'}`;
-      $('#robot-page-status').className = `tag ${connected ? 'tag-cyan' : 'tag-warning'}`;
-      $('#robot-page-status').innerHTML = `<span class="tag-dot"></span> ${connected ? 'ROBOT ONLINE' : 'ROBOT OFFLINE'}`;
-      setText('#robot-stat-badge', connected ? 'ONLINE' : 'OFFLINE'); $('#robot-stat-badge').className = `trend ${connected ? 'good' : 'warning'}`;
-      setText('#robot-stat-number', telemetry.battery == null ? '-- %' : `${telemetry.battery} %`);
-      setText('#robot-stat-status', connected ? 'Connected device' : 'Awaiting device');
-      setText('#robot-mode', telemetry.mode || (connected ? 'Connected' : 'Standby'));
-      setText('#robot-link', connected ? 'Online' : 'Offline');
-      setText('#robot-battery', telemetry.battery == null ? '--' : `${telemetry.battery}%`);
-      setText('#sensor-left', telemetry.sensor_left ?? '--'); setText('#sensor-right', telemetry.sensor_right ?? '--');
-      setText('#left-reading', telemetry.sensor_left ?? '--'); setText('#right-reading', telemetry.sensor_right ?? '--');
-      setText('#system-pill-text', connected ? 'Robot connected' : 'API online · robot offline');
-      $('#quick-stop').disabled = !connected; $$('.direction-btn, #direction-stop').forEach(btn => btn.disabled = !connected);
-      setText('#controller-caption', connected ? 'Connected to the authenticated robot API' : 'API is reachable; waiting for the robot device');
-      setText('#sensor-summary', connected ? 'Receiving robot status. Sensor fields update when the Pi sends telemetry.' : 'No robot device is connected. Camera and sensor data will appear when the Raspberry Pi connects.');
-      if (!options.quiet) toast(connected ? 'Robot API connection is active.' : 'API reached. No robot device is connected yet.', connected ? 'success' : 'error');
+      const wasConnected = state.connected;
+      renderRobotState(!!data.connected, data.telemetry || {});
+      if (!options.quiet) toast(data.connected ? 'Authenticated robot control connection is active.' : 'API is reachable; no control device is connected.', data.connected ? 'success' : 'error');
+      if (!options.quiet && wasConnected !== !!data.connected) addActivity(data.connected ? 'Robot control connected' : 'Robot control disconnected', 'State read from the authenticated device API.', data.connected ? 'mint' : 'orange');
     } catch (error) {
-      state.connected = false;
-      $('#quick-stop').disabled = true; $$('.direction-btn, #direction-stop').forEach(btn => btn.disabled = true);
+      renderRobotState(false, {});
       setText('#system-pill-text', 'API unavailable');
       setText('#controller-caption', 'Could not reach the API. Check the server and sign-in session.');
       if (!options.quiet) toast(error.message || 'Could not reach the robot API.', 'error');
     }
   }
+
+  function formatMetric(value, digits = 1) {
+    return typeof value === 'number' && Number.isFinite(value) ? value.toFixed(digits) : '—';
+  }
+
+  function renderOperationalMetrics(data) {
+    const video = data.video || {};
+    const robot = data.robot || {};
+    const receiverConnected = video.receiver_connected === true;
+    const videoLive = video.live === true;
+    const stateLabel = videoLive ? 'LIVE' : receiverConnected ? 'LISTENING' : 'NO DATA';
+    const stateClass = videoLive ? 'good' : receiverConnected ? 'neutral' : 'warning';
+    setText('#frames-stat-state', stateLabel);
+    $('#frames-stat-state').className = `trend ${stateClass}`;
+    $('#frames-stat').innerHTML = `${formatMetric(video.frames_per_second)} <small>fps</small>`;
+    setText('#frames-stat-total', video.frames_total == null ? '— frames' : `${Number(video.frames_total).toLocaleString()} frames`);
+
+    const sourceNames = {
+      carframework_udp_receiver: 'CarFramework UDP / AVIF',
+      dashboard_websocket_jpeg: 'Dashboard WebSocket / JPEG'
+    };
+    const sourceName = sourceNames[video.source] || 'No receiver data';
+    const lastFrameAge = typeof video.last_frame_age_seconds === 'number' ? `${video.last_frame_age_seconds.toFixed(1)}s ago` : 'No decoded frame';
+    setText('#frames-stat-source', receiverConnected ? `${sourceName} · ${lastFrameAge}` : 'Awaiting signed receiver metrics');
+
+    const processing = video.processing_ms;
+    $('#processing-stat').innerHTML = `${formatMetric(processing)} <small>ms</small>`;
+    setText('#processing-stat-state', processing == null ? 'NOT REPORTED' : 'MEASURED');
+    $('#processing-stat-state').className = `trend ${processing == null ? 'neutral' : 'good'}`;
+    setText('#processing-stat-detail', video.decrypt_errors || video.decode_errors ? `${video.decrypt_errors ?? 0} decrypt · ${video.decode_errors ?? 0} decode errors` : processing == null ? 'No receiver sample' : 'Decrypt + decode average');
+
+    $('#transfer-stat').innerHTML = `${formatMetric(video.receive_megabytes_per_second, 3)} <small>MB/s</small>`;
+    setText('#transfer-stat-state', receiverConnected ? (videoLive ? 'RECEIVING' : 'LISTENING') : 'NO DATA');
+    setText('#transfer-stat-label', video.source === 'carframework_udp_receiver' ? 'Measured encrypted UDP ingress' : video.source === 'dashboard_websocket_jpeg' ? 'Measured WebSocket ingress' : 'Measured incoming data');
+    $('#transfer-stat-state').className = `trend ${videoLive ? 'good' : 'neutral'}`;
+    setText('#frame-size-label', video.source === 'dashboard_websocket_jpeg' ? 'Latest JPEG frame' : 'Latest AVIF frame');
+    setText('#frame-size-stat', video.last_frame_size_bytes == null ? '—' : formatBytes(video.last_frame_size_bytes));
+
+    renderRobotState(!!robot.control_connected, robot.telemetry || {});
+    if (videoLive) setText('#system-pill-text', `${sourceName} · live`);
+    else if (receiverConnected) setText('#system-pill-text', 'CarFramework receiver listening · no live frame');
+    else if (robot.control_connected) setText('#system-pill-text', 'Robot control connected');
+    else setText('#system-pill-text', 'API online · no device data');
+
+    const observedState = {
+      videoSource: video.source || null,
+      videoLive,
+      receiverConnected,
+      controlConnected: !!robot.control_connected
+    };
+    const previous = state.lastObservedState;
+    if (previous !== null) {
+      if (previous.videoSource !== observedState.videoSource || previous.videoLive !== observedState.videoLive) {
+        if (videoLive) addActivity('Video frames received', `${sourceName} is delivering decoded frames.`, 'mint');
+        else if (receiverConnected) addActivity('Receiver connected', 'Metrics heartbeat received; waiting for a decoded frame.', 'cyan');
+        else if (previous.videoSource) addActivity('Video feed stopped', 'No fresh frame or receiver heartbeat is being reported.', 'orange');
+      }
+      if (previous.controlConnected !== observedState.controlConnected) {
+        addActivity(observedState.controlConnected ? 'Robot control connected' : 'Robot control disconnected', 'Authenticated control-link state changed.', observedState.controlConnected ? 'mint' : 'orange');
+      }
+    }
+    state.lastObservedState = observedState;
+  }
+
+  async function refreshOperationalMetrics() {
+    try {
+      const data = await apiRequest('/api/metrics', { headers: { 'Cache-Control': 'no-cache' } });
+      renderOperationalMetrics(data);
+    } catch (error) {
+      setText('#system-pill-text', 'Metrics unavailable');
+      setText('#frames-stat-state', 'API ERROR');
+      $('#frames-stat-state').className = 'trend warning';
+      if (error.message && !/sign in/i.test(error.message)) console.warn('Metrics refresh failed:', error.message);
+    }
+  }
+
+  function startMetricsPolling() {
+    stopMetricsPolling();
+    refreshOperationalMetrics();
+    state.metricsTimer = window.setInterval(refreshOperationalMetrics, 1000);
+  }
+
+  function stopMetricsPolling() {
+    if (state.metricsTimer) window.clearInterval(state.metricsTimer);
+    state.metricsTimer = null;
+  }
+
 
   async function refreshSecurityStatus(options = {}) {
     const refreshButton = $('#security-refresh');
@@ -306,28 +418,71 @@
     if (refreshButton) refreshButton.disabled = true;
     try {
       const data = await apiRequest('/api/security/status');
+      const cf = data.carframework || {};
       const pqcEnabled = data.pqc_transport_enabled === true;
+      const sourceAvailable = data.source_available === true;
       const tag = $('#security-state-tag');
       if (tag) {
         tag.className = `tag ${pqcEnabled ? 'tag-cyan' : 'tag-warning'}`;
-        tag.innerHTML = `<span class="tag-dot"></span> ${pqcEnabled ? 'PQC ENABLED' : 'PQC NOT ACTIVE'}`;
+        tag.innerHTML = `<span class="tag-dot"></span> ${pqcEnabled ? 'PQC VERIFIED' : 'PQC NOT VERIFIED'}`;
       }
-      setText('#security-state-eyebrow', pqcEnabled ? 'SECURE TRANSPORT ACTIVE' : (data.pqc_handshake_code_present ? 'SOURCE CRYPTO PRESENT · BLOCKED' : 'IMPLEMENTATION STATUS'));
-      setText('#security-state-title', pqcEnabled ? 'Post-quantum transport reported active' : (data.pqc_handshake_code_present ? 'CarFramework crypto is present but not operational' : 'Post-quantum transport is not enabled'));
-      setText('#security-state-copy', data.message || 'The backend did not return CarFramework source-level transport details. Do not infer that its encrypted UDP video path is active or connected to this dashboard.');
-      setText('#security-pqc-handshake', data.pqc_handshake_code_present ? 'CODE PRESENT · NOT VERIFIED' : 'NOT PRESENT');
+      setText('#security-state-eyebrow', sourceAvailable ? 'SOURCE INSPECTED · RUNTIME STATUS' : 'SOURCE NOT AVAILABLE');
+      setText('#security-state-title', sourceAvailable ? (cf.nonce_compatible === false ? 'Source configuration has an AES-GCM-SIV nonce mismatch' : 'Source found; cryptographic runtime is not verified') : 'CarFramework source files were not found');
+      const runtimeCopy = data.receiver_reporter_recent
+        ? `\n\nLive receiver report: ${data.receiver_state || 'unknown'} · ${data.receiver_datagrams ?? '—'} UDP datagrams · ${data.receiver_decrypt_errors ?? '—'} decrypt errors · ${data.receiver_decode_errors ?? '—'} decode errors · sender ${data.receiver_sender_ip || 'unknown'}.`
+        : '\n\nNo receiver heartbeat has been received in the last five seconds.';
+      setText('#security-state-copy', `${data.message || 'The backend could not determine the local CarFramework configuration.'}${runtimeCopy}`);
+      const handshakeLabel = data.receiver_handshake_reported ? 'HANDSHAKE REPORTED' : (data.pqc_handshake_code_present ? 'SOURCE CODE FOUND' : 'NOT DETECTED');
+      setText('#security-pqc-handshake', handshakeLabel);
+      setText('#security-pqc-detail', data.receiver_processed_frame ? 'Receiver reported successful decrypt + decode' : data.receiver_handshake_reported ? 'Receiver reported handshake; no decoded frame yet' : 'No live receiver handshake report');
       setText('#security-device-auth', data.robot_token_configured ? 'TOKEN CONFIGURED' : 'TOKEN NOT SET');
-      setText('#security-device-detail', data.robot_token_configured ? 'Separate dashboard WebSocket token is configured' : 'Set ROBOT_DEVICE_TOKEN for the separate dashboard WebSocket API');
+      setText('#security-device-detail', data.robot_token_configured ? 'Dashboard WebSocket token is configured' : 'Dashboard WebSocket token is not configured');
       setText('#security-cookie-status', data.secure_cookie_configured ? 'SECURE' : 'NOT SECURE');
-      setText('#security-cookie-detail', data.secure_cookie_configured ? 'Secure cookie flag is enabled' : 'Set AVIF_COOKIE_SECURE=1 when serving over HTTPS');
+      setText('#security-cookie-detail', data.secure_cookie_configured ? 'Secure cookie flag is enabled' : 'Secure cookie flag is disabled');
       setText('#security-api-status', 'API REACHABLE');
       setText('#security-last-check', new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }));
-      if (!options.quiet) toast(pqcEnabled ? 'Security status refreshed.' : 'API reachable, but CarFramework transport has unresolved compatibility blockers.', pqcEnabled ? 'success' : 'error');
+      setText('#security-source-tag', sourceAvailable ? 'SOURCE READ' : 'SOURCE MISSING');
+
+      setText('#security-kem-name', cf.key_establishment || 'Not detected');
+      setText('#security-kem-meta', cf.key_establishment ? 'Detected in encryption.py' : 'No KEM implementation detected');
+      setText('#security-signature-name', cf.signature_scheme || 'Not detected');
+      setText('#security-signature-copy', cf.signature_scheme ? `The source imports and uses ${cf.signature_scheme} for its signature operations.` : 'No ML-DSA parameter set was detected in encryption.py.');
+      setText('#security-signature-meta', cf.signature_scheme ? 'Detected in encryption.py' : 'No signature parameter set found');
+      setText('#security-kdf-name', cf.key_derivation || 'Not detected');
+      setText('#security-kdf-copy', cf.key_derivation === 'HKDF' ? 'HKDF references were found in the source. Runtime derivation is not independently observed.' : 'No HKDF reference was detected in encryption.py.');
+      setText('#security-kdf-meta', cf.key_derivation === 'HKDF' ? 'SOURCE REFERENCE FOUND' : 'NO HKDF REFERENCE');
+      setText('#security-aead-name', cf.aead || 'Not detected');
+      setText('#security-aead-copy', cf.nonce_compatible === false ? `Source sets a ${cf.configured_nonce_bytes}-byte nonce; ${cf.aead || 'AES-GCM-SIV'} requires ${cf.required_nonce_bytes} bytes.` : cf.nonce_compatible === true ? `Configured nonce length is ${cf.configured_nonce_bytes} bytes. Runtime encryption still requires independent testing.` : 'AEAD and nonce settings could not be read from the source.');
+      setText('#security-aead-meta', cf.configured_nonce_bytes == null ? 'NONCE SETTING UNKNOWN' : `CONFIGURED ${cf.configured_nonce_bytes} BYTES · REQUIRED ${cf.required_nonce_bytes}`);
+
+      if (sourceAvailable) {
+        setText('#security-flow-handshake-title', `Key exchange · UDP ${cf.control_port ?? 'unknown'}`);
+        setText('#security-flow-handshake-copy', `${cf.key_establishment || 'KEM not detected'} with ${cf.signature_scheme || 'signature scheme not detected'} in the supplied source.`);
+        setText('#security-flow-video-title', `Video transport · UDP ${cf.video_port ?? 'unknown'}`);
+        setText('#security-flow-video-copy', `${cf.aead || 'AEAD not detected'}; sender destination ${cf.sender_destination || 'not found'}.`);
+        setText('#security-flow-decode-title', 'Receiver decode path');
+        setText('#security-flow-decode-copy', 'The receiver source is inspected for its decode/display behaviour; live success is shown separately by receiver metrics.');
+      } else {
+        setText('#security-flow-handshake-title', 'Handshake source unavailable');
+        setText('#security-flow-handshake-copy', 'Set CARFRAMEWORK_ROOT to the CarFramework checkout.');
+        setText('#security-flow-video-title', 'Video source unavailable');
+        setText('#security-flow-video-copy', 'Video format, AEAD and port were not read.');
+        setText('#security-flow-decode-title', 'Receiver source unavailable');
+        setText('#security-flow-decode-copy', 'No receiver implementation was available to inspect.');
+      }
+
+      const keyFiles = cf.local_key_files || {};
+      const keyNames = Object.keys(keyFiles);
+      const keyCount = keyNames.filter(name => keyFiles[name]).length;
+      setText('#security-identity-title', keyNames.length ? (keyCount === keyNames.length ? 'All expected key files found locally' : `${keyCount} of ${keyNames.length} expected key files found locally`) : 'Local key-file status unavailable');
+      setText('#security-identity-copy', keyNames.length ? 'Presence only is checked on the dashboard host. No private-key bytes are read or sent to the browser.' : 'Set CARFRAMEWORK_ROOT to the CarFramework checkout to inspect key-file presence.');
+      setText('#security-key-files', keyNames.length ? `${keyCount}/${keyNames.length} present` : 'Unknown');
+      if (!options.quiet) toast(sourceAvailable ? 'Security status refreshed from local source and runtime reports.' : 'CarFramework source folder was not found.', sourceAvailable ? 'success' : 'error');
     } catch (error) {
       const tag = $('#security-state-tag');
       if (tag) { tag.className = 'tag tag-warning'; tag.innerHTML = '<span class="tag-dot"></span> STATUS UNAVAILABLE'; }
-      setText('#security-state-title', 'Could not verify backend security status');
-      setText('#security-state-copy', error.message || 'The security status endpoint could not be reached. This does not mean encryption is active.');
+      setText('#security-state-title', 'Could not gather security status');
+      setText('#security-state-copy', error.message || 'The security endpoint could not be reached.');
       setText('#security-api-status', 'API UNAVAILABLE');
       setText('#security-device-auth', 'UNKNOWN');
       setText('#security-device-detail', 'Backend status could not be read');
@@ -342,25 +497,25 @@
   }
 
   async function copySecurityChecklist() {
-    const checklist = [
-      'CarFramework / Aurora Glass integration notes',
-      '',
-      'Supplied CarFramework source settings:',
-      '- ML-KEM-768 key establishment',
-      '- ML-DSA-44 signatures',
-      '- UDP key-exchange/control port: 5006',
-      '- Encrypted AVIF video port: UDP 5005',
-      '- Sender destination in sender.py: 192.168.68.57:5005',
-      '- AES-256-GCM-SIV is called, but encryption.py sets NONCE_LEN=192; required nonce length is 12 bytes.',
-      '- No HKDF derivation is present in the supplied encryption.py.',
-      '',
-      'Dashboard integration status:',
-      '- FastAPI browser viewer is a separate WebSocket path.',
-      '- reciever.py currently displays decrypted frames via cv2.imshow and does not forward them to the browser.',
-      '- This UI package does not bind UDP 5005 or 5006.',
-      '- Do not claim the video path is operational or post-quantum-secure until the nonce issue and browser frame bridge are fixed and tested.'
-    ].join('\n');
+    let checklist = 'Aurora Glass / CarFramework runtime report\n\n';
     try {
+      const data = await apiRequest('/api/security/status');
+      const cf = data.carframework || {};
+      checklist += `Source files available: ${data.source_available ? 'yes' : 'no'}\n`;
+      checklist += `Key establishment: ${cf.key_establishment || 'not detected'}\n`;
+      checklist += `Signature: ${cf.signature_scheme || 'not detected'}\n`;
+      checklist += `Key derivation: ${cf.key_derivation || 'not detected'}\n`;
+      checklist += `AEAD: ${cf.aead || 'not detected'}\n`;
+      checklist += `Control UDP port: ${cf.control_port ?? 'unknown'}\n`;
+      checklist += `Video UDP port: ${cf.video_port ?? 'unknown'}\n`;
+      checklist += `Sender destination: ${cf.sender_destination || 'not detected'}\n`;
+      checklist += `Configured nonce: ${cf.configured_nonce_bytes ?? 'unknown'} bytes (required: ${cf.required_nonce_bytes ?? 'unknown'})\n`;
+      checklist += `Receiver metrics reporter configured: ${data.metrics_reporter_configured ? 'yes' : 'no'}\n`;
+      checklist += `Dashboard metrics listener active: ${data.metrics_listener_active ? 'yes' : 'no'}\n`;
+      checklist += `Receiver heartbeat recent: ${data.receiver_reporter_recent ? 'yes' : 'no'}\n`;
+      checklist += `Decoded frame reported: ${data.receiver_processed_frame ? 'yes' : 'no'}\n`;
+      checklist += `PQC verified by dashboard: no (not independently attested)\n`;
+      checklist += `\n${data.message || ''}`;
       if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(checklist);
       else {
         const field = document.createElement('textarea'); field.value = checklist; field.setAttribute('readonly', '');
@@ -368,106 +523,10 @@
         const copied = document.execCommand('copy'); field.remove();
         if (!copied) throw new Error('Clipboard access is unavailable in this browser.');
       }
-      toast('CarFramework integration notes copied. No keys or secrets were copied.');
-    } catch (error) { toast(error.message || 'Could not copy the integration notes.', 'error'); }
+      toast('Current source and receiver status copied. No key material was copied.');
+    } catch (error) { toast(error.message || 'Could not gather the security report.', 'error'); }
   }
 
-  function addCommand(command, description) {
-    state.commandCount++;
-    setText('#command-count', `${state.commandCount} EVENTS`); setText('#last-command', command); setText('#last-command-time', `${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })} · ${description}`);
-    const history = $('#command-history'); const empty = $('.empty-log', history); if (empty) empty.remove();
-    const row = document.createElement('div'); row.className = 'command-event'; const b = document.createElement('b'); b.textContent = command; const time = document.createElement('time'); time.textContent = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); row.append(b, time); history.prepend(row);
-    state.commandHistory.unshift({ command, description }); while (history.children.length > 6) history.lastElementChild.remove();
-  }
-  async function sendCommand(command) {
-    if (!state.connected) return toast('Robot is offline. No command was sent.', 'error');
-    try {
-      const data = await apiRequest('/api/robot/command', { method: 'POST', body: JSON.stringify({ command }) });
-      const labels = { forward: 'robot.move_forward', reverse: 'robot.reverse', left: 'robot.turn_left', right: 'robot.turn_right', stop: 'robot.stop' };
-      addCommand(labels[command] || 'robot.unknown', `API accepted · ${data.duration_ms ?? 0} ms pulse`);
-      setText('#robot-mode', command === 'stop' ? 'Stopped' : command === 'forward' || command === 'reverse' ? 'Moving' : 'Turning');
-      if (command === 'stop') state.robotStopped = true; else state.robotStopped = false;
-      toast(`Robot API accepted “${command}”. Firmware watchdog still required.`);
-    } catch (error) { toast(error.message || 'Robot command failed.', 'error'); await connectRobot({ quiet: true }); }
-  }
-
-  function updateCodecUi() {
-    const q = Number(state.quality) || 72; state.quality = q;
-    setText('#quality-number', q); setText('#score-value', q); setText('#quality-display', `${q}%`); setText('#compression-display', `${100 - q}%`);
-    $('#quality-bar').style.width = `${q}%`; $('#compression-bar').style.width = `${100 - q}%`;
-    const ring = $('.score-ring'); ring.style.background = `conic-gradient(from -90deg,#9c91ff 0%,#73e1d9 ${q}%,rgba(136,148,196,.1) ${q}%)`;
-    setText('#score-title', q > 84 ? 'High fidelity profile' : q < 40 ? 'Small-file profile' : 'Balanced profile');
-    setText('#score-copy', q > 84 ? 'Prioritizes visual quality; files may be larger.' : q < 40 ? 'Prioritizes smaller output; visible artifacts may increase.' : 'A practical middle ground between file size and visual quality.');
-    setText('#summary-codec', state.codec); setText('#summary-resolution', state.resolution); setText('#summary-quality', `${q} / 100`); setText('#summary-metadata', state.metadata ? 'Preserved' : 'Discarded'); setText('#summary-chunks', state.chunks ? 'Enabled' : 'Disabled');
-    const descriptions = {
-      AVIF: 'AVIF is designed for efficient still-image compression. A sequence of images is not automatically a standard video stream.',
-      AV1: 'AV1 is a video codec. A real pipeline needs an encoder/decoder implementation and a supported container or streaming transport.',
-      Custom: 'A custom pipeline needs a defined bitstream, framing, encoder, decoder, and compatibility plan before browser playback.'
-    };
-    setText('#codec-description', descriptions[state.codec] || descriptions.AVIF);
-  }
-  function readCodecControls() {
-    state.codec = $('.segment.active')?.dataset.codec || 'AVIF';
-    state.quality = Number($('#quality-range').value); state.resolution = $('#resolution-setting').value; state.pixel = $('#pixel-setting').value;
-    state.metadata = $('#metadata-toggle').checked; state.chunks = $('#chunks-toggle').checked; updateCodecUi();
-  }
-  async function saveCodec() {
-    readCodecControls();
-    const values = { codec: state.codec, quality: state.quality, resolution: state.resolution, pixel: state.pixel, metadata: state.metadata, chunks: state.chunks };
-    let ok = true; for (const [key, value] of Object.entries(values)) ok = await savePref(key, value) && ok;
-    if (ok) { setText('#codec-save-message', 'Saved locally ✓'); toast('Codec profile saved to this browser.'); addActivity('Codec profile saved', `${state.codec} · quality ${state.quality}`, 'cyan'); }
-  }
-  async function saveSettings() {
-    state.workspace = $('#setting-workspace').value.trim().slice(0, 48) || 'Personal workspace';
-    state.compact = $('#compact-toggle').checked; state.reduceMotion = $('#motion-toggle').checked;
-    document.body.classList.toggle('compact-mode', state.compact); document.body.classList.toggle('reduce-motion', state.reduceMotion);
-    const values = { workspace: state.workspace, compact: state.compact, reduceMotion: state.reduceMotion };
-    let ok = true; for (const [key, value] of Object.entries(values)) ok = await savePref(key, value) && ok;
-    setText('#workspace-label', state.workspace);
-    if ($('#user-name').textContent) setText('#greeting-name', state.user.split(/[\s'’]/)[0] || 'builder');
-    if (ok) { setText('#settings-save-message', 'Saved ✓'); toast('Workspace preferences saved.'); }
-  }
-  async function saveNetwork() {
-    state.robotUrl = $('#setting-robot-url').value.trim(); state.videoUrl = $('#setting-video-url').value.trim(); state.apiEndpoint = $('#api-endpoint').value.trim();
-    const values = { robotUrl: state.robotUrl, videoUrl: state.videoUrl, apiEndpoint: state.apiEndpoint };
-    let ok = true; for (const [key, value] of Object.entries(values)) ok = await savePref(key, value) && ok;
-    state.network = { robotUrl: state.robotUrl, videoUrl: state.videoUrl, apiEndpoint: state.apiEndpoint };
-    if (ok) { setText('#network-save-message', 'Saved ✓'); setText('#transfer-status', state.apiEndpoint ? 'ENDPOINT SET' : 'NOT CONNECTED'); toast('Network settings saved. This did not contact any API.'); }
-  }
-
-  async function handleTransferTest() {
-    if (!state.mediaFile) { toast('Import a media file before uploading.', 'error'); setView('video'); return; }
-    const rawEndpoint = $('#api-endpoint').value.trim() || '/api/video/upload';
-    let endpoint;
-    try { endpoint = new URL(rawEndpoint, window.location.origin); }
-    catch { toast('Enter a valid API endpoint.', 'error'); return; }
-    if (endpoint.origin !== window.location.origin) { toast('For safety, media uploads are restricted to this AVIF Lab server.', 'error'); return; }
-    const result = $('#transfer-result'); result.classList.remove('hidden'); result.textContent = 'Uploading media…';
-    const button = $('#simulate-transfer'); button.disabled = true;
-    try {
-      const body = new FormData(); body.append('file', state.mediaFile, state.mediaFile.name);
-      const data = await apiRequest(endpoint.pathname + endpoint.search, { method: 'POST', body });
-      result.textContent = `UPLOADED · ${data.filename} · ${formatBytes(data.size_bytes)} · ID ${data.id}`;
-      setText('#transfer-status', 'UPLOAD COMPLETE'); addActivity('Media uploaded', `${data.filename} · ${formatBytes(data.size_bytes)}`, 'cyan');
-      toast('Media uploaded to the authenticated AVIF Lab API.');
-    } catch (error) {
-      result.textContent = `UPLOAD FAILED · ${error.message}`;
-      setText('#transfer-status', 'UPLOAD FAILED'); toast(error.message || 'Upload failed.', 'error');
-    } finally { button.disabled = false; }
-  }
-
-  async function updateRobotStop() {
-    if (!state.connected) return toast('Robot is offline. Use the physical emergency stop if needed.', 'error');
-    await sendCommand('stop');
-    setText('#robot-mode', 'Stop requested');
-    toast('Stop command requested. A physical kill switch is still essential.', 'error');
-  }
-
-  function hideStageSources() {
-    ['#video-element', '#studio-video'].forEach(sel => { const node = $(sel); node.pause?.(); node.removeAttribute('src'); node.load?.(); node.classList.add('hidden'); });
-    ['#image-element', '#studio-image', '#robot-camera-element', '#studio-robot-camera'].forEach(sel => { const node = $(sel); node.classList.add('hidden'); });
-    ['#laptop-camera-element', '#studio-laptop-camera'].forEach(sel => { const node = $(sel); node.classList.add('hidden'); });
-  }
 
   function setCameraControls(mode) {
     const robot = mode === 'robot'; const laptop = mode === 'laptop';
@@ -600,7 +659,7 @@
   $('#simulate-transfer').addEventListener('click', handleTransferTest);
   ['#camera-start-top', '#dashboard-camera', '#studio-camera'].forEach(sel => $(sel).addEventListener('click', connectRobotCamera));
   ['#camera-stop-top', '#dashboard-camera-stop'].forEach(sel => $(sel).addEventListener('click', stopRobotCamera));
-  ['#local-camera-start-top', '#dashboard-local-camera', '#studio-local-camera'].forEach(sel => $(sel).addEventListener('click', startLocalCamera));
+  ['#local-camera-start-top', '#dashboard-local-camera', '#studio-local-camera'].forEach(sel => { const node = $(sel); if (node) node.addEventListener('click', startLocalCamera); });
   ['#local-camera-stop-top', '#local-camera-stop-studio', '#dashboard-local-camera-stop'].forEach(sel => $(sel).addEventListener('click', stopLocalCamera));
   $('#connect-robot').addEventListener('click', connectRobot); $('#robot-connect-page').addEventListener('click', connectRobot); $('#quick-stop').addEventListener('click', updateRobotStop); $('#direction-stop').addEventListener('click', () => sendCommand('stop'));
   $$('.direction-btn[data-command]').forEach(button => button.addEventListener('click', () => sendCommand(button.dataset.command)));
